@@ -1,0 +1,225 @@
+---
+title: "PredictionAssignment"
+author: "PD"
+date: "April 23, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### Background
+
+    Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here:
+<http://groupware.les.inf.puc-rio.br/har> (see the section on the Weight Lifting Exercise Dataset).
+
+    **Data **
+
+    The training data for this project are available here:
+<https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>
+
+    The test data are available here:
+<https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv>
+    
+    The data for this project come from this source:<http://groupware.les.inf.puc-rio.br/har>. If you use the document you create for this class for any purpose please cite them as they have been very generous in allowing their data to be used for this kind of assignment.
+
+##Prepare the datasets
+
+Read the training data into a data table (TrainData).
+
+```{r }
+require(data.table)
+url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+DATA <- fread(url)
+```
+Read the testing data into a data table(TestData).
+
+```{r }
+url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+TestData <- fread(url)
+```
+
+Belt, arm, dumbbell, and forearm variables with NO missing values in the test dataset will be predictor candidates.
+
+```{r }
+isAnyMissing <- sapply(TestData, function (x) any(is.na(x) | x == ""))
+isPredictor <- !isAnyMissing & grepl("belt|[^(fore)]arm|dumbbell|forearm", names(isAnyMissing))
+predCandidates <- names(isAnyMissing)[isPredictor]
+predCandidates
+```
+
+Subset the predicator candidates of primary dataset and the outcome variable, classe.
+
+```{r }
+varToInclude <- c("classe", predCandidates)
+DATA <- DATA[, varToInclude, with=FALSE]
+dim(DATA)
+names(DATA)
+```
+
+Factorise classe:
+
+```{r }
+DATA <- DATA[, classe := factor(DATA[, classe])]
+DATA[, .N, classe]
+```
+
+Split the dataset into a 60% training and 40% probing dataset.
+
+```{r }
+require(caret)
+set.seed(2017)
+inTrain <- createDataPartition(DATA$classe, p=0.6)
+TrainData<- DATA[inTrain[[1]]]
+DProbe <- DATA[-inTrain[[1]]]
+```
+
+Preprocess the prediction variables by centering and scaling.
+
+```{r }
+X <- TrainData[, predCandidates, with=FALSE]
+preProc <- preProcess(X)
+preProc
+XCS <- predict(preProc, X)
+DTrainCS <- data.table(data.frame(classe = TrainData[, classe], XCS))
+```
+
+Apply the centering and scaling to the probing dataset.
+
+```{r }
+X <- DProbe[, predCandidates, with=FALSE]
+XCS <- predict(preProc, X)
+DProbeCS <- data.table(data.frame(classe = DProbe[, classe], XCS))
+```
+
+Check for near zero variance.
+
+```{r }
+nzv <- nearZeroVar(DTrainCS, saveMetrics=TRUE)
+if (any(nzv$nzv)) nzv else message("No variables with near zero variance")
+```
+
+Examine groups of prediction variables.
+
+```{r }
+histGroup <- function (data, regex) {
+  col <- grep(regex, names(data))
+  col <- c(col, which(names(data) == "classe"))
+  require(reshape2)
+  n <- nrow(data)
+  DMelted <- melt(data[, col, with=FALSE][, rownum := seq(1, n)], id.vars=c("rownum", "classe"))
+  require(ggplot2)
+  ggplot(DMelted, aes(x=classe, y=value)) +
+    geom_violin(aes(color=classe, fill=classe), alpha=1/2) +
+#     geom_jitter(aes(color=classe, fill=classe), alpha=1/10) +
+#     geom_smooth(aes(group=1), method="gam", color="black", alpha=1/2, size=2) +
+    facet_wrap(~ variable, scale="free_y") +
+    scale_color_brewer(palette="Spectral") +
+    scale_fill_brewer(palette="Spectral") +
+    labs(x="", y="") +
+    theme(legend.position="none")
+}
+histGroup(DTrainCS, "belt")
+histGroup(DTrainCS, "[^(fore)]arm")
+histGroup(DTrainCS, "dumbbell")
+histGroup(DTrainCS, "forearm")
+```
+
+## Building prediction model
+
+Using random forest, the out of sample error should be small. The error will be estimated using the 40% probing sample. 
+
+Construct the parallel clusters.
+
+```{r }
+require(parallel)
+require(doParallel)
+cl <- makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+```
+
+Set the control parameters.
+
+```{r }
+ctrl <- trainControl(classProbs=TRUE,
+                     savePredictions=TRUE,
+                     allowParallel=TRUE)
+```
+
+Fit model over the tuning parameters.
+
+```{r }
+method <- "rf"
+system.time(TrainMdl <- train(classe ~ ., data=DTrainCS, method=method))
+```
+
+Stop the clusters.
+
+```{r }
+stopCluster(cl)
+```
+
+##Evaluate against the training dataset
+
+```{r }
+TrainMdl
+Set <- predict(TrainMdl, DTrainCS)
+confusionMatrix(Set, TrainData[, classe])
+```
+
+##Evaluate against the probing dataset
+
+```{r }
+Set <- predict(TrainMdl, DProbeCS)
+confusionMatrix(Set, DProbeCS[, classe])
+```
+
+##The model
+
+```{r }
+varImp(TrainMdl)
+TrainMdl$finalModel
+```
+
+###The estimated error rate is less than 1%.
+
+Save training model object for later.
+
+```{r }
+save(TrainMdl, file="TrainMdl.RData")
+```
+
+##Predict on the test data
+
+Load the training model.
+
+```{r }
+load(file="TrainMdl.RData", verbose=TRUE)
+```
+
+Get predictions and evaluate.
+
+```{r }
+TestDataCS <- predict(preProc, TestData[, predCandidates, with=FALSE])
+Set <- predict(TrainMdl, TestDataCS)
+TestData <- cbind(Set , TestData)
+subset(TestData, select=names(TestData)[grep("belt|[^(fore)]arm|dumbbell|forearm", names(TestData), invert=TRUE)])
+```
+
+##Submission to Coursera
+
+Write submission files.
+```{r }
+write_files = function(x){
+  n = length(x)
+  path <- "PA_files"
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=file.path(path, filename),quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+write_files(Set)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
